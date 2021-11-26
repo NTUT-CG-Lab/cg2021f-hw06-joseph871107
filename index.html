@@ -17,7 +17,7 @@
 		<script>
 			// 建構子 ScoreOutputer 接受一個字串，該字串為 csv 的檔案名稱
 			// 以下面範例，檔名就為 "109598105(總分: 6).csv"
-			var so = new ScoreOutputer("109598105");
+			var so = new ScoreOutputer("110598005");
 			so.installCSS(function(){
 				// 安裝 bootstrap 的 css，如果在 html 上方引用 bootstrap 5.1.1 的話就不用使用 installCSS ，注意一定要 bootstrap css 5.1.1 版
 				// installCSS 接收一個 callback 當作參數，作為成功安裝 bootstrap css 的回呼函式
@@ -30,9 +30,9 @@
 				//addChild 要比 renderModal 先呼叫
 				so.addChild("場景顯示目標模型", 1, true);
 				so.addChild("場景顯示成果模型", 1, true);
-				so.addChild("執行pytorch3D程式碼產生25個模型", 2, false);
-				so.addChild("可拖動GUI顯示不同階段模型", 3, false);
-				so.addChild("可更換其他模型", 3, false);
+				so.addChild("執行pytorch3D程式碼產生25個模型", 2, true);
+				so.addChild("可拖動GUI顯示不同階段模型", 3, true);
+				so.addChild("可更換其他模型", 3, true);
 		
 				//產生自評表，參數如下所示
 				so.renderModal(
@@ -74,12 +74,171 @@
 
             import { GUI } from './jsm/libs/dat.gui.module.js';
 
+			class ModelManager{
+				constructor(scene, modelList){
+					this.scene = scene;
+
+					// The iterations of pytorch3d models
+					this.model_iters = [0,5,10,20,30,40,50,60,80,100,130,160,190,220,250,300,400,500,600,800,1000,1250,1500,1750,2000];
+					this.gui = new GUI();
+					this.controls = {'step': 1, 'model': 0};
+
+					this.modelList = modelList;
+					this.modelListKeys = Object.keys(this.modelList);
+					var tModelList= {};
+					for (var i=0; i<this.modelListKeys.length; i++){
+						const key = this.modelListKeys[i];
+						tModelList[key] = i;
+					}
+
+					this.gui.add(this.controls, 'step', 1, this.model_iters.length, 1).onChange(() => {this.current_iter = this.controls.step - 1;});
+					this.gui.add(this.controls, 'model', tModelList).onChange(() => {this.current_index = this.controls.model;});
+
+					this._current_index = 0;
+					this._current_iter = 0;
+					this.models = new Array(this.modelListKeys.length);
+					for(var i=0; i<this.models.length; i++){
+						this.models[i] = {
+							main: null,
+							iters: new Array(this.model_iters.length),
+						};
+					}
+
+
+					// PLY model files
+
+					this.loader = new PLYLoader();
+
+					// The material for pytorch3d model
+					this.material = new THREE.MeshPhongMaterial( { color: 0xFF5555, specular: 0x111111, shininess: 200 } );
+					this.materialPyTorch3D = new THREE.MeshPhongMaterial( { color: 0xAAAAAA, specular: 0x111111, shininess: 200 } );
+
+					for(var i=0; i<this.modelListKeys.length; i++){
+						const key = this.modelListKeys[i];
+						var cfg = this.modelList[key];
+
+						function deg2ra(deg){
+							return deg*Math.PI/180;
+						}
+						const rotation = new THREE.Euler(deg2ra(cfg.rotation.x), deg2ra(cfg.rotation.y), deg2ra(cfg.rotation.z), 'XYZ');
+						this.LoadModel(
+							this,
+							i,
+							key,
+							cfg.scale,
+							cfg.position,
+							cfg.positionT,
+							rotation,
+						);
+					}
+				}
+
+				set current_index(index){
+					var model;
+					model = this.models[this._current_index].main;
+					if (model)
+						this.scene.remove(model);
+					this.current_iter = -1;
+
+					this._current_index = index;
+					
+					var model;
+					model = this.models[this._current_index].main;
+					if (model)
+						this.scene.add(model);
+					this.current_iter = 0;
+				}
+
+				get current_index(){
+					return this._current_index;
+				}
+
+				set current_iter(index){
+					var model;
+					model = this.models[this.current_index].iters[this._current_iter];
+					if (model)
+						this.scene.remove(model);
+					
+					if (index != -1){
+						this._current_iter = index;
+
+						model = this.models[this.current_index].iters[this._current_iter]
+						if (model)
+							this.scene.add(model);
+						this.controls.step = index + 1;
+						this.gui.updateDisplay();
+					}
+				}
+
+				get current_iter(){
+					return this._current_iter;
+				}
+
+				iterOnChange(){
+					this.current_iter = this.controls.step - 1
+				}
+
+				LoadModel(scope, index, name, scale=1.0, position=new THREE.Vector3(), positionT=new THREE.Vector3(), rotation=new THREE.Euler(), callback=function(){}){
+					console.log(name)
+					// Load original model according to model_id
+					scope.loader.load(
+						`./models/${name}.ply`,
+						function ( geometry ) {
+							geometry.computeVertexNormals();
+
+							const mesh = new THREE.Mesh( geometry, scope.material );
+
+							mesh.material.side = THREE.DoubleSide
+							mesh.scale.multiplyScalar(scale);
+							mesh.position.copy(position);
+							mesh.rotation.copy(rotation);
+
+							mesh.castShadow = true;
+							mesh.receiveShadow = true;
+							scope.models[index].main = mesh;
+							
+							if (index == 0){
+								scope.current_index = 0;
+							}
+							callback();
+						}
+					);
+
+					// Load models of pytorch3d 
+					for(var i=0; i<scope.model_iters.length; i++){
+						const iter = scope.model_iters[i];
+						function _load_iter_model(index, ii, name){
+							scope.loader.load(
+								`./models/${name}/model_${iter}.ply`,
+								function ( geometry ) {
+									geometry.computeVertexNormals();
+
+									const mesh = new THREE.Mesh( geometry, scope.materialPyTorch3D );
+
+									mesh.position.copy(positionT);
+									mesh.scale.multiplyScalar(scale);
+									mesh.position.copy(positionT);
+									mesh.rotation.copy(rotation);
+
+									mesh.castShadow = true;
+									mesh.receiveShadow = true;
+									scope.models[index].iters[ii] = mesh;
+								
+									if (index == 0 && ii == 0){
+										scope.current_iter = 0;
+									}
+								}
+							);
+						}
+						_load_iter_model(index, i, name);
+					}
+				}
+			}
+
 			let container;
 
 			let camera, cameraTarget, scene, renderer;
-
-			// The iterations of pytorch3d models
-            const models = [0,5,10,20,30,40,50,60,80,100,130,160,190,220,250,300,400,500,600,800,1000,1250,1500,1750,2000];
+			let manager;
 
 			init();
 			animate();
@@ -110,51 +269,14 @@
 				scene.add( plane );
 
 				plane.receiveShadow = true;
-
-
-				// PLY model files
-
-                const loader = new PLYLoader();
-
-				// Load original model according to model_id
-				loader.load( './models/dolphin.ply', function ( geometry ) {
-
-					const material = new THREE.MeshPhongMaterial( { color: 0xFF5555, specular: 0x111111, shininess: 200 } );
-					geometry.computeVertexNormals();
-
-					const mesh = new THREE.Mesh( geometry, material );
-
-					mesh.position.set( -0.5, -0.5, 0 );
-					mesh.scale.multiplyScalar( 1.5 );
-
-					mesh.castShadow = true;
-					mesh.receiveShadow = true;
-
-					scene.add( mesh );
-				} );
-
-				// The material for pytorch3d model
-				const material = new THREE.MeshPhongMaterial( { color: 0xAAAAAA, specular: 0x111111, shininess: 200 } );
-				
-				// Load models of pytorch3d 
-				loader.load( './models/dolphin/model_2000.ply', 
-				function ( geometry ) {
-
-					geometry.computeVertexNormals();
-
-                    const mesh = new THREE.Mesh( geometry, material );
-
-                    mesh.position.set( 0.5, -0.5, 0 );
-					mesh.scale.multiplyScalar( 1.5 );
-
-                    mesh.castShadow = true;
-                    mesh.receiveShadow = true;
-					
-                    scene.add( mesh );
-                } );
-
-
-
+				manager = new ModelManager(scene, {
+					'dolphin': {
+						scale: 1.5,
+						position: new THREE.Vector3(-0.5, -0.5, 0),
+						positionT: new THREE.Vector3(0.5, -0.5, 0),
+						rotation: new THREE.Vector3(0, 0, 0),
+					},
+				});
 
 				// Lights
 
